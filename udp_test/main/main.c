@@ -218,7 +218,7 @@ void app_main(void)
     char *target = extract_value(rx_buffer, "target");
 
     // instead of using ip for target, we should use some arbitrary string decided during flash
-    if (target == NULL || (strcmp(target, "all") != 0 && strcmp(target, "ESP32_A") != 0))
+    if (target == NULL || (strcmp(target, "all") != 0 && strcmp(target, "ESP32_B") != 0))
     {
       printf("Target invalid. Skipping message.\n");
       if (target)
@@ -278,7 +278,7 @@ void app_main(void)
       continue;
     }
 
-    char *ack_msg = "{ \"id\": \"ESP32_A\", \"status\": \"ack\" }";
+    char *ack_msg = "{ \"id\": \"ESP32_B\", \"status\": \"ack\" }";
     sendto(sock, ack_msg, strlen(ack_msg), 0,
            (struct sockaddr *)&dest_addr, sizeof(dest_addr));
 
