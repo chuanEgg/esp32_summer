@@ -90,7 +90,7 @@ void wifi_init_sta()
   esp_wifi_start(); // Start Wi-Fi driver
 }
 
-char *extract_value(const char *msg, const char *key)
+int extract_value(const char *msg, const char *key, char *buffer, size_t buffer_size)
 {
   // Build search pattern: "\"key\":"
   char pattern[64];
@@ -98,7 +98,7 @@ char *extract_value(const char *msg, const char *key)
 
   const char *start = strstr(msg, pattern);
   if (!start)
-    return NULL;
+    return 0; // Not found
 
   start += strlen(pattern);
 
@@ -112,16 +112,12 @@ char *extract_value(const char *msg, const char *key)
     end++;
 
   int len = end - start;
-  if (len <= 0)
-    return NULL;
+  if (len <= 0 || len >= buffer_size)
+    return 0; // Invalid length or buffer too small
 
-  char *value = (char *)malloc(len + 1);
-  if (!value)
-    return NULL;
-
-  strncpy(value, start, len);
-  value[len] = '\0';
-  return value;
+  strncpy(buffer, start, len);
+  buffer[len] = '\0';
+  return 1; // Success
 }
 
 // LED Control Functions
@@ -163,22 +159,17 @@ static void led_blink_task(void *pvParameter)
   vTaskDelete(NULL); // Delete this task
 }
 
-void app_main(void)
+// UDP communication task
+static void udp_client_task(void *pvParameters)
 {
-  wifi_init_sta();
-  printf("Waiting for Wi-Fi connection...\n");
-  xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, false, true, portMAX_DELAY);
-  printf("✅ Wi-Fi connected successfully!\n");
-
-  // Configure LED
-  configure_led();
-  ESP_LOGI(TAG, "LED configured successfully!");
+  ESP_LOGI(TAG, "UDP client task started");
 
   int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP); // Create IPv4 UDP socket
   int broadcast = 1;
   if (setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast)) < 0)
   {
     perror("setsockopt failed");
+    vTaskDelete(NULL);
     return;
   }
 
@@ -188,19 +179,20 @@ void app_main(void)
   listen_addr.sin_port = htons(12345);             // Host-to-network byte order for port
   listen_addr.sin_addr.s_addr = htonl(INADDR_ANY); // Listen on any local IP
 
-  // bind(sock, (struct sockaddr *)&listen_addr, sizeof(listen_addr)); // Bind socket to port
   if (bind(sock, (struct sockaddr *)&listen_addr, sizeof(listen_addr)) < 0)
   {
     perror("bind failed");
+    close(sock);
+    vTaskDelete(NULL);
     return;
   }
   else
   {
-    printf("Bind succuessfully\n");
+    printf("UDP client bind successfully on port 12345\n");
   }
+
   while (true)
   {
-
     // receive UDP broadcast
     char rx_buffer[256];
     struct sockaddr_in source_addr; // Will hold sender's info
@@ -215,33 +207,37 @@ void app_main(void)
       rx_buffer[len] = 0; // Null-terminate string for safety
       printf("Received: %s\n", rx_buffer);
     }
-    char *target = extract_value(rx_buffer, "target");
 
-    // instead of using ip for target, we should use some arbitrary string decided during flash
-    if (target == NULL || (strcmp(target, "all") != 0 && strcmp(target, "ESP32_B") != 0))
+    // Static buffers for extracted values
+    static char target[64];
+    static char ack_ip[64];
+    static char cmd[64];
+
+    // Extract target
+    if (!extract_value(rx_buffer, "target", target, sizeof(target)))
     {
-      printf("Target invalid. Skipping message.\n");
-      if (target)
-        free(target);
-      continue; // Skip if target is not 'all'
-    }
-    // send ACK
-    char *ack_ip = extract_value(rx_buffer, "ack_ip");
-    if (ack_ip == NULL)
-    {
-      printf("ACK IP not found in received message. Skipping ACK.\n");
-      if (target)
-        free(target);
+      printf("Target not found in received message. Skipping message.\n");
       continue;
     }
-    char *cmd = extract_value(rx_buffer, "cmd");
-    if (cmd == NULL)
+
+    // instead of using ip for target, we should use some arbitrary string decided during flash
+    if (strcmp(target, "all") != 0 && strcmp(target, "ESP32_A") != 0)
+    {
+      printf("Target invalid. Skipping message.\n");
+      continue; // Skip if target is not 'all'
+    }
+
+    // Extract ACK IP
+    if (!extract_value(rx_buffer, "ack_ip", ack_ip, sizeof(ack_ip)))
+    {
+      printf("ACK IP not found in received message. Skipping ACK.\n");
+      continue;
+    }
+
+    // Extract command
+    if (!extract_value(rx_buffer, "cmd", cmd, sizeof(cmd)))
     {
       printf("cmd not found in received message. Skipping ACK.\n");
-      if (target)
-        free(target);
-      if (ack_ip)
-        free(ack_ip);
       continue;
     }
 
@@ -252,6 +248,7 @@ void app_main(void)
       static int blink_count = 3; // Blink 3 times
       // Create a task to handle blinking so it doesn't block UDP reception
       xTaskCreate(led_blink_task, "led_blink", 2048, &blink_count, 5, NULL);
+      ESP_LOGI(TAG, "LED blink task created successfully");
     }
     else if (strcmp(cmd, "start") == 0)
     {
@@ -262,6 +259,7 @@ void app_main(void)
     {
       ESP_LOGI(TAG, "Received unknown command: %s", cmd);
     }
+
     printf("ACK IP: %s\n", ack_ip);
     struct sockaddr_in dest_addr;
     dest_addr.sin_family = AF_INET;
@@ -269,25 +267,38 @@ void app_main(void)
     if (inet_pton(AF_INET, ack_ip, &dest_addr.sin_addr) != 1)
     {
       printf("Invalid ACK IP address format. Skipping ACK.\n");
-      if (target)
-        free(target);
-      if (ack_ip)
-        free(ack_ip);
-      if (cmd)
-        free(cmd);
       continue;
     }
 
-    char *ack_msg = "{ \"id\": \"ESP32_B\", \"status\": \"ack\" }";
+    char *ack_msg = "{ \"id\": \"ESP32_A\", \"status\": \"ack\" }";
     sendto(sock, ack_msg, strlen(ack_msg), 0,
            (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+    printf("Sent ACK to %s: %s\n", ack_ip, ack_msg);
+  }
 
-    // Free allocated memory
-    if (target)
-      free(target);
-    if (ack_ip)
-      free(ack_ip);
-    if (cmd)
-      free(cmd);
+  // Cleanup (this code won't be reached due to infinite loop)
+  close(sock);
+  vTaskDelete(NULL);
+}
+
+void app_main(void)
+{
+  wifi_init_sta();
+  printf("Waiting for Wi-Fi connection...\n");
+  xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, false, true, portMAX_DELAY);
+  printf("✅ Wi-Fi connected successfully!\n");
+
+  // Configure LED
+  configure_led();
+  ESP_LOGI(TAG, "LED configured successfully!");
+
+  // Create UDP client task
+  xTaskCreate(udp_client_task, "udp_client", 4096, NULL, 5, NULL);
+  ESP_LOGI(TAG, "UDP client task created successfully");
+
+  // Keep app_main running (optional - could also delete this task)
+  while (1)
+  {
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
   }
 }
