@@ -142,7 +142,7 @@ def main(args):
     server = socket.socket(
         socket.AF_INET, socket.SOCK_STREAM)  # socket.socket()
     server.bind((HOST, PORT))  # .bind(IPaddress, port)
-    server.listen(20)  # start to listen, .listen(max amount clients in line)
+    server.listen(30)  # start to listen, .listen(max amount clients in line)
     logger.info(f"listening on {server.getsockname()[0]}")
     client_thread = threading.Thread(
         target=receiveClient, args=(server,), daemon=True)
